@@ -11,7 +11,6 @@ const required = [
   "TWILIO_ACCOUNT_SID",
   "TWILIO_AUTH_TOKEN",
   "TWILIO_WHATSAPP_NUMBER",
-  "GOOGLE_API_KEY",
 ];
 const missing = required.filter((k) => !process.env[k]);
 if (missing.length > 0) {

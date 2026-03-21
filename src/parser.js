@@ -1,67 +1,128 @@
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+/**
+ * Simple rule-based reminder parser — no AI, no API, always free.
+ * Supports Hebrew and English.
+ */
 
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
+function parseReminderRequest(userMessage, timezone) {
+  const msg = userMessage.trim().toLowerCase();
 
-async function parseReminderRequest(userMessage, timezone) {
-  const now = new Date();
-  const nowISO = now.toISOString();
-
-  const prompt = `You are a reminder parsing assistant. The current date/time is ${nowISO} (UTC).
-The user's local timezone is: ${timezone}.
-
-The user sent this message: "${userMessage}"
-
-Determine if this is a request to set a reminder. If it is, extract:
-1. The exact UTC datetime to send the reminder (ISO 8601 format)
-2. The reminder text (what to remind them about, in a friendly short phrase)
-
-If the user is asking to LIST their reminders, respond with action "list".
-If the user is asking to CANCEL or delete reminders, respond with action "cancel".
-If the message is not a reminder request at all, respond with action "unknown".
-
-Respond ONLY with a valid JSON object in one of these shapes:
-
-For a reminder:
-{"action":"remind","remindAt":"2024-03-15T14:00:00.000Z","reminderText":"Call Mom"}
-
-For listing:
-{"action":"list"}
-
-For cancellation:
-{"action":"cancel"}
-
-For unrecognised input:
-{"action":"unknown","hint":"brief friendly explanation of what you understood"}
-
-Rules:
-- "in 2 hours" means now + 2 hours
-- "tomorrow at 10am" means next calendar day at 10:00 in the user's timezone, converted to UTC
-- "tonight at 8" means today at 20:00 in the user's timezone
-- If no AM/PM is given and the hour is <= 7, assume PM (e.g. "at 7" → 19:00)
-- Never return a remindAt in the past
-- Keep reminderText short (max 15 words), imperative, e.g. "Call Mom", "Buy milk", "Take medication"
-- Works with any language including Hebrew`;
-
-  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-  const result = await model.generateContent(prompt);
-  const raw = result.response.text().trim().replace(/```json|```/g, "").trim();
-
-  try {
-    const parsed = JSON.parse(raw);
-    if (parsed.action === "remind") {
-      const remindAt = new Date(parsed.remindAt);
-      if (isNaN(remindAt.getTime())) {
-        return { error: "לא הצלחתי להבין מתי לתזכר אותך. תנסה שוב?" };
-      }
-      if (remindAt <= now) {
-        return { error: "הזמן הזה כבר עבר. תן לי זמן עתידי!" };
-      }
-      return { action: "remind", remindAt, reminderText: parsed.reminderText };
-    }
-    return parsed;
-  } catch {
-    return { error: "לא הבנתי. נסה משהו כמו: 'תזכיר לי לקרוא לאמא בעוד שעתיים'" };
+  // List reminders
+  if (/^(list|רשימה|תראה|הצג)/.test(msg)) {
+    return { action: "list" };
   }
+
+  // Cancel
+  if (/^(cancel|בטל|מחק)/.test(msg)) {
+    return { action: "cancel" };
+  }
+
+  // Extract reminder text — everything after "to/ל/את" keyword
+  let reminderText = extractReminderText(userMessage);
+
+  // Parse time
+  const remindAt = parseTime(msg, timezone);
+
+  if (!remindAt) {
+    return {
+      error:
+        "לא הבנתי מתי. נסה לכתוב:\n• \"תזכיר לי לקרוא לאמא בעוד שעה\"\n• \"remind me to drink water in 30 minutes\"\n• \"תזכיר לי מחר ב-9:00 לקנות חלב\"",
+    };
+  }
+
+  if (remindAt <= new Date()) {
+    return { error: "הזמן הזה כבר עבר. תן לי זמן עתידי!" };
+  }
+
+  return { action: "remind", remindAt, reminderText: reminderText || userMessage };
+}
+
+function extractReminderText(msg) {
+  // Hebrew: after "ל" or "את"
+  let m = msg.match(/תזכיר לי ל(.+?)(?:בעוד|ב-|מחר|היום|הלילה|בשעה|$)/i);
+  if (m) return m[1].trim();
+
+  m = msg.match(/תזכיר לי את (.+?)(?:בעוד|ב-|מחר|היום|הלילה|בשעה|$)/i);
+  if (m) return m[1].trim();
+
+  // English: after "to"
+  m = msg.match(/remind me to (.+?)(?:in |at |tomorrow|tonight|today|$)/i);
+  if (m) return m[1].trim();
+
+  return msg;
+}
+
+function parseTime(msg, timezone) {
+  const now = new Date();
+
+  // "in X minutes"
+  let m = msg.match(/(?:in|בעוד)\s+(\d+)\s*(?:minutes?|minute|דקות?|דק)/i);
+  if (m) return addMinutes(now, parseInt(m[1]));
+
+  // "in X hours"
+  m = msg.match(/(?:in|בעוד)\s+(\d+)\s*(?:hours?|hour|שעות?|שעה)/i);
+  if (m) return addMinutes(now, parseInt(m[1]) * 60);
+
+  // "in X days"
+  m = msg.match(/(?:in|בעוד)\s+(\d+)\s*(?:days?|day|ימים?|יום)/i);
+  if (m) return addMinutes(now, parseInt(m[1]) * 60 * 24);
+
+  // "tomorrow at HH:MM" or "מחר ב-HH:MM"
+  m = msg.match(/(?:tomorrow|מחר).*?(\d{1,2})(?::(\d{2}))?/i);
+  if (m) {
+    const hour = parseInt(m[1]);
+    const minute = parseInt(m[2] || "0");
+    return tomorrowAt(hour, minute, timezone);
+  }
+
+  // "tonight at H" / "הלילה ב-H"
+  m = msg.match(/(?:tonight|הלילה).*?(\d{1,2})(?::(\d{2}))?/i);
+  if (m) {
+    const hour = parseInt(m[1]) < 12 ? parseInt(m[1]) + 12 : parseInt(m[1]);
+    const minute = parseInt(m[2] || "0");
+    return todayAt(hour, minute, timezone);
+  }
+
+  // "today at HH:MM" / "היום ב-HH:MM" / "ב-HH:MM"
+  m = msg.match(/(?:today|היום|ב-)(\d{1,2})(?::(\d{2}))?/i);
+  if (m) {
+    const hour = parseInt(m[1]);
+    const minute = parseInt(m[2] || "0");
+    return todayAt(hour, minute, timezone);
+  }
+
+  // "at HH:MM"
+  m = msg.match(/(?:at|בשעה)\s*(\d{1,2})(?::(\d{2}))?/i);
+  if (m) {
+    let hour = parseInt(m[1]);
+    const minute = parseInt(m[2] || "0");
+    if (hour <= 7) hour += 12; // assume PM if ambiguous
+    const t = todayAt(hour, minute, timezone);
+    if (t > now) return t;
+    return tomorrowAt(hour, minute, timezone);
+  }
+
+  return null;
+}
+
+function addMinutes(date, minutes) {
+  return new Date(date.getTime() + minutes * 60 * 1000);
+}
+
+function todayAt(hour, minute, timezone) {
+  const now = new Date();
+  const str = now.toLocaleDateString("en-CA", { timeZone: timezone }); // YYYY-MM-DD
+  return new Date(`${str}T${pad(hour)}:${pad(minute)}:00`);
+}
+
+function tomorrowAt(hour, minute, timezone) {
+  const now = new Date();
+  const tomorrow = new Date(now.getTime() + 86400000);
+  const str = tomorrow.toLocaleDateString("en-CA", { timeZone: timezone });
+  return new Date(`${str}T${pad(hour)}:${pad(minute)}:00`);
+}
+
+function pad(n) {
+  return String(n).padStart(2, "0");
 }
 
 module.exports = { parseReminderRequest };
