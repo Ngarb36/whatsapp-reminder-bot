@@ -1,6 +1,6 @@
 const express = require("express");
-const { parseReminderRequest } = require("./parser");
-const { addReminder, listPendingForPhone, deleteReminder } = require("./db");
+const { parseReminderRequest, nextOccurrence } = require("./parser");
+const { addReminder, listPendingForPhone, deleteReminder, updateReminder } = require("./db");
 const { sendMessage } = require("./whatsapp");
 
 const router = express.Router();
@@ -66,12 +66,12 @@ router.post("/webhook", async (req, res) => {
       } else {
         const lines = pending.map((r, i) => {
           const timeStr = formatTime(r.remind_at, timezone);
-          const recurStr = r.recurrence ? ` 🔁 ${formatRecurrence(r.recurrence)}` : "";
-          return `*${i + 1}.* ${r.message} — ${timeStr}${recurStr}`;
+          const recurStr = r.recurrence ? `\n   🔁 ${formatRecurrence(r.recurrence)}` : "";
+          return `${i + 1}. ${r.message}\n   📅 ${timeStr}${recurStr}`;
         });
         await sendMessage(
           from,
-          `📋 *התזכורות שלך:*\n\n${lines.join("\n")}\n\nלמחוק: שלח "מחק <מספר>"`
+          `📋 התזכורות שלך:\n\n${lines.join("\n\n")}\n\nמחיקה: "מחק 1"\nעריכה: "ערוך 1 [זמן או טקסט חדש]"`
         );
       }
       return;
@@ -87,13 +87,37 @@ router.post("/webhook", async (req, res) => {
       }
       const r = pending[idx];
       deleteReminder(r.id, from);
-      await sendMessage(from, `🗑️ מחקתי: *${r.message}*`);
+      await sendMessage(from, `🗑️ מחקתי: ${r.message}`);
+      return;
+    }
+
+    // ── Edit ──────────────────────────────────────────────────────────────────
+    if (result.action === "edit") {
+      const pending = listPendingForPhone(from);
+      const idx = result.index - 1;
+      if (idx < 0 || idx >= pending.length) {
+        await sendMessage(from, `לא מצאתי תזכורת מספר ${result.index}. שלח "list" לראות את הרשימה.`);
+        return;
+      }
+      const r = pending[idx];
+      const newTime = parseReminderRequest(result.newValue, timezone);
+
+      // If newValue looks like a time → update time only
+      if (newTime.action === "remind") {
+        const newUnix = Math.floor(newTime.remindAt.getTime() / 1000);
+        updateReminder(r.id, from, { remind_at: newUnix });
+        await sendMessage(from, `✏️ עדכנתי את הזמן של "${r.message}" ל-${formatTime(newUnix, timezone)}`);
+      } else {
+        // Otherwise → update text only
+        updateReminder(r.id, from, { message: result.newValue });
+        await sendMessage(from, `✏️ עדכנתי את הטקסט ל: ${result.newValue}`);
+      }
       return;
     }
 
     // ── Cancel help ───────────────────────────────────────────────────────────
     if (result.action === "cancel_help") {
-      await sendMessage(from, `לביטול תזכורת שלח "list" כדי לראות את המספרים, ואז "מחק <מספר>"`);
+      await sendMessage(from, `שלח "list" לראות את התזכורות, ואז "מחק <מספר>" למחיקה`);
       return;
     }
 

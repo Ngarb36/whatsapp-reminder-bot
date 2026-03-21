@@ -67,6 +67,15 @@ function deleteReminder(id, phone) {
   return data.reminders.length < before;
 }
 
+function updateReminder(id, phone, fields) {
+  const data = load();
+  const r = data.reminders.find((r) => r.id === id && r.phone === phone);
+  if (!r) return false;
+  Object.assign(r, fields);
+  save(data);
+  return true;
+}
+
 module.exports = {
   addReminder,
   getDueReminders,
@@ -74,4 +83,5 @@ module.exports = {
   rescheduleRecurring,
   listPendingForPhone,
   deleteReminder,
+  updateReminder,
 };

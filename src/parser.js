@@ -21,6 +21,10 @@ function parseReminderRequest(userMessage, timezone) {
   let m = msgLower.match(/^(?:מחק|בטל|delete|cancel)\s+(\d+)$/);
   if (m) return { action: "delete", index: parseInt(m[1]) };
 
+  // Edit: "ערוך 1 ב-10:00" or "ערוך 1 לשתות מים"
+  m = msg.match(/^(?:ערוך|edit)\s+(\d+)\s+(.+)$/i);
+  if (m) return { action: "edit", index: parseInt(m[1]), newValue: m[2].trim() };
+
   // Generic cancel (no number)
   if (/^(?:מחק|בטל|delete|cancel)$/.test(msgLower)) return { action: "cancel_help" };
 
