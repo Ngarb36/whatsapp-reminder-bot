@@ -1,31 +1,41 @@
 const express = require("express");
 const { parseReminderRequest } = require("./parser");
-const { addReminder, listPendingForPhone } = require("./db");
+const { addReminder, listPendingForPhone, deleteReminder } = require("./db");
 const { sendMessage } = require("./whatsapp");
 
 const router = express.Router();
-
-// Twilio sends form-encoded POST bodies
 router.use(express.urlencoded({ extended: false }));
 
+const DAYS_HE = ["ראשון", "שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת"];
+
 function formatTime(unixSeconds, timezone) {
-  return new Date(unixSeconds * 1000).toLocaleString("en-US", {
+  return new Date(unixSeconds * 1000).toLocaleString("he-IL", {
     timeZone: timezone,
     weekday: "short",
     month: "short",
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
-    hour12: true,
+    hour12: false,
   });
 }
 
+function formatRecurrence(rec) {
+  if (!rec) return "";
+  const parts = rec.split(":");
+  if (parts[0] === "daily") return `כל יום ב-${parts[1]}:${parts[2]}`;
+  if (parts[0] === "weekly") {
+    const dayName = DAYS_HE[parseInt(parts[1])] || parts[1];
+    return `כל ${dayName} ב-${parts[2]}:${parts[3]}`;
+  }
+  return rec;
+}
+
 router.post("/webhook", async (req, res) => {
-  // Respond to Twilio immediately so it doesn't retry
   res.set("Content-Type", "text/xml");
   res.send("<Response></Response>");
 
-  const from = req.body.From; // e.g. "whatsapp:+972521234567"
+  const from = req.body.From;
   const body = (req.body.Body || "").trim();
   const timezone = process.env.TIMEZONE || "UTC";
 
@@ -36,60 +46,71 @@ router.post("/webhook", async (req, res) => {
   try {
     const result = await parseReminderRequest(body, timezone);
 
-    if (result.error) {
-      await sendMessage(from, result.error);
-      return;
-    }
-
+    // ── Set reminder ──────────────────────────────────────────────────────────
     if (result.action === "remind") {
-      const { remindAt, reminderText } = result;
+      const { remindAt, reminderText, recurrence } = result;
       const unixSecs = Math.floor(remindAt.getTime() / 1000);
-      addReminder(from, reminderText, unixSecs);
+      addReminder(from, reminderText, unixSecs, recurrence);
 
-      const formattedTime = formatTime(unixSecs, timezone);
-      await sendMessage(
-        from,
-        `✅ Got it! I'll remind you to *${reminderText}* on ${formattedTime}.`
-      );
+      const timeStr = formatTime(unixSecs, timezone);
+      const recurStr = recurrence ? `\n🔁 חוזרת: ${formatRecurrence(recurrence)}` : "";
+      await sendMessage(from, `✅ קבעתי! אזכיר לך *${reminderText}*\n📅 ${timeStr}${recurStr}`);
       return;
     }
 
+    // ── List ──────────────────────────────────────────────────────────────────
     if (result.action === "list") {
       const pending = listPendingForPhone(from);
       if (pending.length === 0) {
-        await sendMessage(from, "You have no pending reminders. 🎉");
+        await sendMessage(from, "אין לך תזכורות פעילות. 🎉");
       } else {
-        const lines = pending.map(
-          (r, i) =>
-            `${i + 1}. *${r.message}* — ${formatTime(r.remind_at, timezone)}`
-        );
+        const lines = pending.map((r, i) => {
+          const timeStr = formatTime(r.remind_at, timezone);
+          const recurStr = r.recurrence ? ` 🔁 ${formatRecurrence(r.recurrence)}` : "";
+          return `*${i + 1}.* ${r.message} — ${timeStr}${recurStr}`;
+        });
         await sendMessage(
           from,
-          `📋 Your upcoming reminders:\n\n${lines.join("\n")}`
+          `📋 *התזכורות שלך:*\n\n${lines.join("\n")}\n\nלמחוק: שלח "מחק <מספר>"`
         );
       }
       return;
     }
 
-    if (result.action === "cancel") {
-      await sendMessage(
-        from,
-        "To cancel a reminder, please reply with the reminder number from your list. Type *list* to see your reminders."
-      );
+    // ── Delete ────────────────────────────────────────────────────────────────
+    if (result.action === "delete") {
+      const pending = listPendingForPhone(from);
+      const idx = result.index - 1;
+      if (idx < 0 || idx >= pending.length) {
+        await sendMessage(from, `לא מצאתי תזכורת מספר ${result.index}. שלח "list" לראות את הרשימה.`);
+        return;
+      }
+      const r = pending[idx];
+      deleteReminder(r.id, from);
+      await sendMessage(from, `🗑️ מחקתי: *${r.message}*`);
       return;
     }
 
-    // Unknown / unrelated message
+    // ── Cancel help ───────────────────────────────────────────────────────────
+    if (result.action === "cancel_help") {
+      await sendMessage(from, `לביטול תזכורת שלח "list" כדי לראות את המספרים, ואז "מחק <מספר>"`);
+      return;
+    }
+
+    // ── Error ─────────────────────────────────────────────────────────────────
+    if (result.error) {
+      await sendMessage(from, result.error);
+      return;
+    }
+
+    // ── Unknown ───────────────────────────────────────────────────────────────
     await sendMessage(
       from,
-      `I'm your reminder assistant! 🤖\n\nTry:\n• "Remind me to call Mom in 2 hours"\n• "Remind me tomorrow at 9am to take my meds"\n• "List my reminders"`
+      `אני בוט תזכורות! 🤖\n\nמה שאני יכול:\n• "תזכיר לי להתקלח בעוד שעה"\n• "תזכיר לי מחר ב-9:00 לקנות חלב"\n• "תזכיר לי כל יום שלישי ב-20:00 לצלצל לאמא"\n• "list" — לראות את כל התזכורות\n• "מחק 2" — למחוק תזכורת`
     );
   } catch (err) {
-    console.error("[webhook] Error handling message:", err);
-    await sendMessage(
-      from,
-      "Sorry, something went wrong on my end. Please try again!"
-    ).catch(() => {});
+    console.error("[webhook] Error:", err);
+    await sendMessage(from, "משהו השתבש. נסה שוב!").catch(() => {});
   }
 });
 

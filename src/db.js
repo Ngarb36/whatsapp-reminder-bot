@@ -12,10 +12,17 @@ function save(data) {
   fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
 }
 
-function addReminder(phone, message, remindAt) {
+function addReminder(phone, message, remindAt, recurrence = null) {
   const data = load();
   const id = data.nextId++;
-  data.reminders.push({ id, phone, message, remind_at: remindAt, sent: false });
+  data.reminders.push({
+    id,
+    phone,
+    message,
+    remind_at: remindAt,   // Unix timestamp (seconds)
+    recurrence,            // null | "daily:HH:MM" | "weekly:N:HH:MM"
+    sent: false,
+  });
   save(data);
   return id;
 }
@@ -32,11 +39,39 @@ function markSent(id) {
   save(data);
 }
 
-function listPendingForPhone(phone) {
-  const now = Math.floor(Date.now() / 1000);
-  return load().reminders.filter(
-    (r) => r.phone === phone && !r.sent && r.remind_at > now
-  ).sort((a, b) => a.remind_at - b.remind_at);
+/** After a recurring reminder fires, reschedule it for next occurrence */
+function rescheduleRecurring(id, nextRemindAt) {
+  const data = load();
+  const r = data.reminders.find((r) => r.id === id);
+  if (r) {
+    r.remind_at = nextRemindAt;
+    r.sent = false;
+  }
+  save(data);
 }
 
-module.exports = { addReminder, getDueReminders, markSent, listPendingForPhone };
+function listPendingForPhone(phone) {
+  const now = Math.floor(Date.now() / 1000);
+  return load()
+    .reminders.filter((r) => r.phone === phone && !r.sent && r.remind_at > now)
+    .sort((a, b) => a.remind_at - b.remind_at);
+}
+
+function deleteReminder(id, phone) {
+  const data = load();
+  const before = data.reminders.length;
+  data.reminders = data.reminders.filter(
+    (r) => !(r.id === id && r.phone === phone)
+  );
+  save(data);
+  return data.reminders.length < before;
+}
+
+module.exports = {
+  addReminder,
+  getDueReminders,
+  markSent,
+  rescheduleRecurring,
+  listPendingForPhone,
+  deleteReminder,
+};
