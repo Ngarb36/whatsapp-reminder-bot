@@ -54,7 +54,7 @@ router.post("/webhook", async (req, res) => {
 
       const timeStr = formatTime(unixSecs, timezone);
       const recurStr = recurrence ? `\n🔁 חוזרת: ${formatRecurrence(recurrence)}` : "";
-      await sendMessage(from, `✅ קבעתי! אזכיר לך *${reminderText}*\n📅 ${timeStr}${recurStr}`);
+      await sendMessage(from, `✅ קבעתי! אזכיר לך: ${reminderText}\n📅 ${timeStr}${recurStr}`);
       return;
     }
 
