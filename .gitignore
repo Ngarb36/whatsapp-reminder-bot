@@ -1,0 +1,5 @@
+node_modules/
+.env
+reminders.db
+reminders.db-shm
+reminders.db-wal
