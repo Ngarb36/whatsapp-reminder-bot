@@ -50,7 +50,7 @@ router.post("/webhook", async (req, res) => {
     if (result.action === "remind") {
       const { remindAt, reminderText, recurrence } = result;
       const unixSecs = Math.floor(remindAt.getTime() / 1000);
-      addReminder(from, reminderText, unixSecs, recurrence);
+      await addReminder(from, reminderText, unixSecs, recurrence);
 
       const timeStr = formatTime(unixSecs, timezone);
       const recurStr = recurrence ? `\n🔁 חוזרת: ${formatRecurrence(recurrence)}` : "";
@@ -60,7 +60,7 @@ router.post("/webhook", async (req, res) => {
 
     // ── List ──────────────────────────────────────────────────────────────────
     if (result.action === "list") {
-      const pending = listPendingForPhone(from);
+      const pending = await listPendingForPhone(from);
       if (pending.length === 0) {
         await sendMessage(from, "אין לך תזכורות פעילות. 🎉");
       } else {
@@ -79,21 +79,21 @@ router.post("/webhook", async (req, res) => {
 
     // ── Delete ────────────────────────────────────────────────────────────────
     if (result.action === "delete") {
-      const pending = listPendingForPhone(from);
+      const pending = await listPendingForPhone(from);
       const idx = result.index - 1;
       if (idx < 0 || idx >= pending.length) {
         await sendMessage(from, `לא מצאתי תזכורת מספר ${result.index}. שלח "list" לראות את הרשימה.`);
         return;
       }
       const r = pending[idx];
-      deleteReminder(r.id, from);
+      await deleteReminder(r.id, from);
       await sendMessage(from, `🗑️ מחקתי: ${r.message}`);
       return;
     }
 
     // ── Edit ──────────────────────────────────────────────────────────────────
     if (result.action === "edit") {
-      const pending = listPendingForPhone(from);
+      const pending = await listPendingForPhone(from);
       const idx = result.index - 1;
       if (idx < 0 || idx >= pending.length) {
         await sendMessage(from, `לא מצאתי תזכורת מספר ${result.index}. שלח "list" לראות את הרשימה.`);
@@ -105,11 +105,11 @@ router.post("/webhook", async (req, res) => {
       // If newValue looks like a time → update time only
       if (newTime.action === "remind") {
         const newUnix = Math.floor(newTime.remindAt.getTime() / 1000);
-        updateReminder(r.id, from, { remind_at: newUnix });
+        await updateReminder(r.id, from, { remind_at: newUnix });
         await sendMessage(from, `✏️ עדכנתי את הזמן של "${r.message}" ל-${formatTime(newUnix, timezone)}`);
       } else {
         // Otherwise → update text only
-        updateReminder(r.id, from, { message: result.newValue });
+        await updateReminder(r.id, from, { message: result.newValue });
         await sendMessage(from, `✏️ עדכנתי את הטקסט ל: ${result.newValue}`);
       }
       return;

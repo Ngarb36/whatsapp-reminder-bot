@@ -1,82 +1,88 @@
-const fs = require("fs");
-const path = require("path");
+const { Pool } = require("pg");
 
-const DB_PATH = path.join(__dirname, "..", "reminders.json");
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
 
-function load() {
-  if (!fs.existsSync(DB_PATH)) return { nextId: 1, reminders: [] };
-  return JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
+async function init() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS reminders (
+      id          SERIAL PRIMARY KEY,
+      phone       TEXT    NOT NULL,
+      message     TEXT    NOT NULL,
+      remind_at   BIGINT  NOT NULL,
+      recurrence  TEXT,
+      sent        BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at  BIGINT  NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())
+    );
+    CREATE INDEX IF NOT EXISTS idx_remind_at ON reminders (remind_at, sent);
+  `);
 }
 
-function save(data) {
-  fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
-}
-
-function addReminder(phone, message, remindAt, recurrence = null) {
-  const data = load();
-  const id = data.nextId++;
-  data.reminders.push({
-    id,
-    phone,
-    message,
-    remind_at: remindAt,   // Unix timestamp (seconds)
-    recurrence,            // null | "daily:HH:MM" | "weekly:N:HH:MM"
-    sent: false,
-  });
-  save(data);
-  return id;
-}
-
-function getDueReminders() {
-  const now = Math.floor(Date.now() / 1000);
-  return load().reminders.filter((r) => !r.sent && r.remind_at <= now);
-}
-
-function markSent(id) {
-  const data = load();
-  const r = data.reminders.find((r) => r.id === id);
-  if (r) r.sent = true;
-  save(data);
-}
-
-/** After a recurring reminder fires, reschedule it for next occurrence */
-function rescheduleRecurring(id, nextRemindAt) {
-  const data = load();
-  const r = data.reminders.find((r) => r.id === id);
-  if (r) {
-    r.remind_at = nextRemindAt;
-    r.sent = false;
-  }
-  save(data);
-}
-
-function listPendingForPhone(phone) {
-  const now = Math.floor(Date.now() / 1000);
-  return load()
-    .reminders.filter((r) => r.phone === phone && !r.sent && r.remind_at > now)
-    .sort((a, b) => a.remind_at - b.remind_at);
-}
-
-function deleteReminder(id, phone) {
-  const data = load();
-  const before = data.reminders.length;
-  data.reminders = data.reminders.filter(
-    (r) => !(r.id === id && r.phone === phone)
+async function addReminder(phone, message, remindAt, recurrence = null) {
+  const res = await pool.query(
+    "INSERT INTO reminders (phone, message, remind_at, recurrence) VALUES ($1, $2, $3, $4) RETURNING id",
+    [phone, message, remindAt, recurrence]
   );
-  save(data);
-  return data.reminders.length < before;
+  return res.rows[0].id;
 }
 
-function updateReminder(id, phone, fields) {
-  const data = load();
-  const r = data.reminders.find((r) => r.id === id && r.phone === phone);
-  if (!r) return false;
-  Object.assign(r, fields);
-  save(data);
-  return true;
+async function getDueReminders() {
+  const now = Math.floor(Date.now() / 1000);
+  const res = await pool.query(
+    "SELECT * FROM reminders WHERE sent = FALSE AND remind_at <= $1 ORDER BY remind_at ASC",
+    [now]
+  );
+  return res.rows;
+}
+
+async function markSent(id) {
+  await pool.query("UPDATE reminders SET sent = TRUE WHERE id = $1", [id]);
+}
+
+async function rescheduleRecurring(id, nextRemindAt) {
+  await pool.query(
+    "UPDATE reminders SET remind_at = $1, sent = FALSE WHERE id = $2",
+    [nextRemindAt, id]
+  );
+}
+
+async function listPendingForPhone(phone) {
+  const now = Math.floor(Date.now() / 1000);
+  const res = await pool.query(
+    "SELECT * FROM reminders WHERE phone = $1 AND sent = FALSE AND remind_at > $2 ORDER BY remind_at ASC",
+    [phone, now]
+  );
+  return res.rows;
+}
+
+async function deleteReminder(id, phone) {
+  const res = await pool.query(
+    "DELETE FROM reminders WHERE id = $1 AND phone = $2",
+    [id, phone]
+  );
+  return res.rowCount > 0;
+}
+
+async function updateReminder(id, phone, fields) {
+  const sets = [];
+  const vals = [];
+  let i = 1;
+  for (const [key, val] of Object.entries(fields)) {
+    sets.push(`${key} = $${i++}`);
+    vals.push(val);
+  }
+  vals.push(id, phone);
+  const res = await pool.query(
+    `UPDATE reminders SET ${sets.join(", ")} WHERE id = $${i++} AND phone = $${i}`,
+    vals
+  );
+  return res.rowCount > 0;
 }
 
 module.exports = {
+  init,
   addReminder,
   getDueReminders,
   markSent,
