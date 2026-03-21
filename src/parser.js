@@ -1,14 +1,7 @@
-const Anthropic = require("@anthropic-ai/sdk");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 
-/**
- * Parses a natural language reminder request.
- * Returns { remindAt: Date, reminderText: string } or { error: string }.
- *
- * @param {string} userMessage  - Raw message from the user
- * @param {string} timezone     - IANA timezone string (e.g. "America/New_York")
- */
 async function parseReminderRequest(userMessage, timezone) {
   const now = new Date();
   const nowISO = now.toISOString();
@@ -46,31 +39,28 @@ Rules:
 - "tonight at 8" means today at 20:00 in the user's timezone
 - If no AM/PM is given and the hour is <= 7, assume PM (e.g. "at 7" → 19:00)
 - Never return a remindAt in the past
-- Keep reminderText short (max 15 words), imperative, e.g. "Call Mom", "Buy milk", "Take medication"`;
+- Keep reminderText short (max 15 words), imperative, e.g. "Call Mom", "Buy milk", "Take medication"
+- Works with any language including Hebrew`;
 
-  const response = await client.messages.create({
-    model: "claude-haiku-4-5-20251001",
-    max_tokens: 256,
-    messages: [{ role: "user", content: prompt }],
-  });
-
-  const raw = response.content[0].text.trim();
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  const result = await model.generateContent(prompt);
+  const raw = result.response.text().trim().replace(/```json|```/g, "").trim();
 
   try {
     const parsed = JSON.parse(raw);
     if (parsed.action === "remind") {
       const remindAt = new Date(parsed.remindAt);
       if (isNaN(remindAt.getTime())) {
-        return { error: "I couldn't figure out when to remind you. Could you be more specific?" };
+        return { error: "לא הצלחתי להבין מתי לתזכר אותך. תנסה שוב?" };
       }
       if (remindAt <= now) {
-        return { error: "That time is already in the past. Please give me a future time!" };
+        return { error: "הזמן הזה כבר עבר. תן לי זמן עתידי!" };
       }
       return { action: "remind", remindAt, reminderText: parsed.reminderText };
     }
-    return parsed; // list / cancel / unknown
+    return parsed;
   } catch {
-    return { error: "I had trouble understanding that. Try something like: 'Remind me to call Mom in 2 hours'." };
+    return { error: "לא הבנתי. נסה משהו כמו: 'תזכיר לי לקרוא לאמא בעוד שעתיים'" };
   }
 }
 
