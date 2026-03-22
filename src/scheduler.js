@@ -1,6 +1,6 @@
 const cron = require("node-cron");
 const { getDueReminders, markSent, rescheduleRecurring } = require("./db");
-const { sendMessage } = require("./whatsapp");
+const { sendReminderWithButtons } = require("./whatsapp");
 const { nextOccurrence } = require("./parser");
 
 const TIMEZONE = process.env.TIMEZONE || "UTC";
@@ -9,7 +9,7 @@ async function processDueReminders() {
   const due = await getDueReminders();
   for (const reminder of due) {
     try {
-      await sendMessage(reminder.phone, `⏰ תזכורת: ${reminder.message}`);
+      await sendReminderWithButtons(reminder.phone, reminder.message);
 
       if (reminder.recurrence) {
         const next = nextOccurrence(reminder.recurrence, TIMEZONE);

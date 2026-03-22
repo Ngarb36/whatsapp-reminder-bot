@@ -25,4 +25,17 @@ async function sendMessage(to, body) {
   });
 }
 
-module.exports = { sendMessage };
+async function sendReminderWithButtons(to, reminderText) {
+  const contentSid = process.env.TWILIO_REMINDER_CONTENT_SID;
+  if (!contentSid) return sendMessage(to, `⏰ תזכורת: ${reminderText}`);
+
+  return getClient().messages.create({
+    from: process.env.TWILIO_WHATSAPP_NUMBER,
+    to,
+    contentSid,
+    contentVariables: JSON.stringify({ 1: reminderText }),
+    messagingServiceSid: undefined,
+  });
+}
+
+module.exports = { sendMessage, sendReminderWithButtons };

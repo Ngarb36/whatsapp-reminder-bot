@@ -37,9 +37,27 @@ router.post("/webhook", async (req, res) => {
 
   const from = req.body.From;
   const body = (req.body.Body || "").trim();
+  const buttonPayload = req.body.ButtonPayload || "";
   const timezone = process.env.TIMEZONE || "UTC";
 
-  if (!from || !body) return;
+  if (!from) return;
+
+  // ── Button press ────────────────────────────────────────────────────────────
+  if (buttonPayload === "done") {
+    await sendMessage(from, "✅ כל הכבוד!").catch(() => {});
+    return;
+  }
+  if (buttonPayload === "snooze") {
+    const pending = await listPendingForPhone(from);
+    // Snooze last reminder that just fired — we add a new one for 10 min
+    const snoozeAt = Math.floor((Date.now() + 10 * 60 * 1000) / 1000);
+    const lastMsg = pending[0]?.message || "תזכורת";
+    await addReminder(from, lastMsg, snoozeAt, null);
+    await sendMessage(from, `⏱ בסדר, אזכיר לך שוב בעוד 10 דקות.`).catch(() => {});
+    return;
+  }
+
+  if (!body) return;
 
   console.log(`[webhook] Message from ${from}: "${body}"`);
 
