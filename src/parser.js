@@ -141,14 +141,31 @@ function nextOccurrence(recurrence, timezone) {
 function parseTime(msg, timezone) {
   const now = new Date();
 
-  let m = msg.match(/(?:in|בעוד)\s+(\d+)\s*(?:minutes?|דקות?|דק'?)/);
+  // "בעוד X דקות" / "עוד X דקות" / "in X minutes"
+  let m = msg.match(/(?:in|בעוד|עוד)\s+(\d+)\s*(?:minutes?|דקות?|דק'?)/);
   if (m) return addMinutes(now, parseInt(m[1]));
 
-  m = msg.match(/(?:in|בעוד)\s+(\d+)\s*(?:hours?|שעות?|שעה)/);
+  // "X דקות" alone (e.g. "5 דקות")
+  m = msg.match(/^(\d+)\s*(?:דקות?|דק'?)$/);
+  if (m) return addMinutes(now, parseInt(m[1]));
+
+  // "בעוד X שעות" / "עוד X שעות" / "in X hours"
+  m = msg.match(/(?:in|בעוד|עוד)\s+(\d+)\s*(?:hours?|שעות?|שעה)/);
   if (m) return addMinutes(now, parseInt(m[1]) * 60);
 
-  m = msg.match(/(?:in|בעוד)\s+(\d+)\s*(?:days?|ימים?|יום)/);
+  // "X שעות" alone
+  m = msg.match(/^(\d+)\s*(?:שעות?|שעה)$/);
+  if (m) return addMinutes(now, parseInt(m[1]) * 60);
+
+  // "בעוד X ימים" / "עוד X ימים" / "in X days"
+  m = msg.match(/(?:in|בעוד|עוד)\s+(\d+)\s*(?:days?|ימים?|יום)/);
   if (m) return addMinutes(now, parseInt(m[1]) * 60 * 24);
+
+  // "דקה" alone = 1 minute
+  if (/^(?:עוד\s+)?דקה$/.test(msg)) return addMinutes(now, 1);
+
+  // "שעה" alone = 1 hour
+  if (/^(?:עוד\s+)?שעה$/.test(msg)) return addMinutes(now, 60);
 
   m = msg.match(/(?:tomorrow|מחר)[\s\S]*?(\d{1,2})(?::(\d{2}))?/);
   if (m) return zonedDate(1, parseInt(m[1]), parseInt(m[2] || "0"), timezone);
@@ -192,8 +209,8 @@ function extractReminderText(msg) {
   m = msg.match(/(?:כל\s+(?:יום\s+)?(?:ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת|יום))[\s\S]*?\d{1,2}(?::\d{2})?\s+ל?(.+)/i);
   if (m && m[1].trim()) return m[1].trim();
 
-  // Hebrew one-time: "תזכיר לי <text> בעוד/מחר/..."
-  m = msg.match(/תזכיר לי (.+?)(?:\s+(?:בעוד|מחר|היום|הלילה|בשעה|כל)|\s+ב-\d|$)/i);
+  // Hebrew one-time: "תזכיר לי <text> בעוד/עוד/מחר/..."
+  m = msg.match(/תזכיר לי (.+?)(?:\s+(?:בעוד|עוד|מחר|היום|הלילה|בשעה|כל)|\s+ב-\d|$)/i);
   if (m && m[1].trim()) return m[1].trim();
 
   // English: "remind me to <text> in/at/..."
