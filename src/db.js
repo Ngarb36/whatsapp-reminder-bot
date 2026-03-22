@@ -17,7 +17,28 @@ async function init() {
       created_at  BIGINT  NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())
     );
     CREATE INDEX IF NOT EXISTS idx_remind_at ON reminders (remind_at, sent);
+
+    CREATE TABLE IF NOT EXISTS phone_state (
+      phone          TEXT PRIMARY KEY,
+      last_fired_id  INT
+    );
   `);
+}
+
+async function setLastFired(phone, id) {
+  await pool.query(
+    `INSERT INTO phone_state (phone, last_fired_id) VALUES ($1, $2)
+     ON CONFLICT (phone) DO UPDATE SET last_fired_id = $2`,
+    [phone, id]
+  );
+}
+
+async function getLastFired(phone) {
+  const res = await pool.query(
+    "SELECT last_fired_id FROM phone_state WHERE phone = $1",
+    [phone]
+  );
+  return res.rows[0]?.last_fired_id || null;
 }
 
 async function addReminder(phone, message, remindAt, recurrence = null) {
@@ -90,4 +111,6 @@ module.exports = {
   listPendingForPhone,
   deleteReminder,
   updateReminder,
+  setLastFired,
+  getLastFired,
 };

@@ -1,6 +1,6 @@
 const express = require("express");
 const { parseReminderRequest, nextOccurrence } = require("./parser");
-const { addReminder, listPendingForPhone, deleteReminder, updateReminder } = require("./db");
+const { addReminder, listPendingForPhone, deleteReminder, updateReminder, getLastFired } = require("./db");
 const { sendMessage } = require("./whatsapp");
 
 const router = express.Router();
@@ -44,16 +44,18 @@ router.post("/webhook", async (req, res) => {
 
   // ── Button press ────────────────────────────────────────────────────────────
   if (buttonPayload === "done") {
+    const lastId = await getLastFired(from);
+    if (lastId) await deleteReminder(lastId, from);
     await sendMessage(from, "✅ כל הכבוד!").catch(() => {});
     return;
   }
   if (buttonPayload === "snooze") {
-    const pending = await listPendingForPhone(from);
-    // Snooze last reminder that just fired — we add a new one for 10 min
-    const snoozeAt = Math.floor((Date.now() + 10 * 60 * 1000) / 1000);
-    const lastMsg = pending[0]?.message || "תזכורת";
-    await addReminder(from, lastMsg, snoozeAt, null);
-    await sendMessage(from, `⏱ בסדר, אזכיר לך שוב בעוד 10 דקות.`).catch(() => {});
+    const lastId = await getLastFired(from);
+    if (lastId) {
+      const snoozeAt = Math.floor((Date.now() + 10 * 60 * 1000) / 1000);
+      await updateReminder(lastId, from, { remind_at: snoozeAt });
+      await sendMessage(from, "⏱ בסדר, אזכיר לך שוב בעוד 10 דקות.").catch(() => {});
+    }
     return;
   }
 
