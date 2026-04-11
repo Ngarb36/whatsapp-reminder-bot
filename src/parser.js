@@ -5,6 +5,11 @@
 
 const HE_DAYS = { ראשון: 0, שני: 1, שלישי: 2, רביעי: 3, חמישי: 4, שישי: 5, שבת: 6 };
 const EN_DAYS = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
+const HE_NUMS = {
+  אחד: 1, שניים: 2, שתיים: 2, שלושה: 3, שלוש: 3,
+  ארבעה: 4, ארבע: 4, חמישה: 5, חמש: 5, שישה: 6, שש: 6,
+  שבעה: 7, שבע: 7, שמונה: 8, תשעה: 9, תשע: 9, עשרה: 10, עשר: 10,
+};
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -56,7 +61,7 @@ function parseReminderRequest(userMessage, timezone) {
       return { error: "הזמן הזה כבר עבר. תן לי זמן עתידי!" };
     return {
       error:
-        "לא הבנתי מתי.\n\nדוגמאות:\n• תזכיר לי להתקלח בעוד שעה\n• תזכיר לי מחר ב-9:00 לקנות חלב\n• תזכיר לי כל יום שלישי ב-20:00 לצלצל לאמא\n• list — לראות את כל התזכורות",
+        "לא הבנתי מתי.\n\nדוגמאות:\n• תזכיר לי להתקלח בעוד שעה\n• תזכיר לי מחר ב-9:00 לקנות חלב\n• תזכיר לי כל יום שלישי ב-20:00 לצלצל לאמא\n• תזכיר לי כל 3 ימים ב-8:00 לשתות תרופה\n• list — לראות את כל התזכורות",
     };
   }
 
@@ -149,8 +154,8 @@ function parseTime(msg, timezone) {
 // ── Task text extraction ──────────────────────────────────────────────────────
 
 function extractTaskText(msg, timeExpr) {
-  // Remove "תזכיר לי" prefix
-  let text = msg.replace(/^תזכיר לי\s*/i, "").trim();
+  // Remove reminder trigger words prefix
+  let text = msg.replace(/^(?:תזכורת|תזכיר לי|תזכיר)\s*/i, "").trim();
 
   // Remove the matched time expression
   if (timeExpr) {
@@ -172,12 +177,28 @@ function escapeRegex(s) {
 function parseRecurring(msg, timezone) {
   let m;
 
+  // ── "כל יום שלישי" etc. (must be before "כל יום" to avoid false match) ────
+  for (const [name, dayNum] of Object.entries(HE_DAYS)) {
+    const re = new RegExp(`כל\\s+יום\\s+${name}[\\s\\S]*?(\\d{1,2})(?::(\\d{2}))?`);
+    m = msg.match(re);
+    if (m) {
+      const h = parseInt(m[1]), min = parseInt(m[2] || "0");
+      return { remindAt: nextWeeklyOccurrence(dayNum, h, min, timezone), recurrence: `weekly:${dayNum}:${pad(h)}:${pad(min)}`, timeExpr: m[0] };
+    }
+  }
+
+  // ── "כל X ימים" / "כל ארבעה ימים" / "כל יומיים" (interval) ───────────────
+  const interval = parseIntervalRecurring(msg, timezone);
+  if (interval) return interval;
+
+  // ── "כל יום" / "every day" (daily) ───────────────────────────────────────
   m = msg.match(/(?:כל יום|every day)[\s\S]*?(\d{1,2})(?::(\d{2}))?/);
   if (m) {
     const h = parseInt(m[1]), min = parseInt(m[2] || "0");
     return { remindAt: nextDailyOccurrence(h, min, timezone), recurrence: `daily:${pad(h)}:${pad(min)}`, timeExpr: m[0] };
   }
 
+  // ── "כל שלישי" (Hebrew weekly, without "יום") ────────────────────────────
   for (const [name, dayNum] of Object.entries(HE_DAYS)) {
     const re = new RegExp(`כל\\s+${name}[\\s\\S]*?(\\d{1,2})(?::(\\d{2}))?`);
     m = msg.match(re);
@@ -186,6 +207,8 @@ function parseRecurring(msg, timezone) {
       return { remindAt: nextWeeklyOccurrence(dayNum, h, min, timezone), recurrence: `weekly:${dayNum}:${pad(h)}:${pad(min)}`, timeExpr: m[0] };
     }
   }
+
+  // ── English weekly ────────────────────────────────────────────────────────
   for (const [name, dayNum] of Object.entries(EN_DAYS)) {
     const re = new RegExp(`every\\s+${name}[\\s\\S]*?(\\d{1,2})(?::(\\d{2}))?`);
     m = msg.match(re);
@@ -196,6 +219,51 @@ function parseRecurring(msg, timezone) {
   }
 
   return null;
+}
+
+function parseIntervalRecurring(msg, timezone) {
+  let n = null;
+  let intervalExpr = null;
+
+  // "כל יומיים" (every 2 days)
+  let m = msg.match(/(כל\s+יומיים)/);
+  if (m) { n = 2; intervalExpr = m[1]; }
+
+  // "כל 4 ימים" (numeric)
+  if (!n) {
+    m = msg.match(/(כל\s+(\d+)\s+ימים?)/);
+    if (m) { n = parseInt(m[2]); intervalExpr = m[1]; }
+  }
+
+  // "every 4 days" (English numeric)
+  if (!n) {
+    m = msg.match(/(every\s+(\d+)\s+days?)/);
+    if (m) { n = parseInt(m[2]); intervalExpr = m[1]; }
+  }
+
+  // "כל ארבעה ימים" (Hebrew word numbers)
+  if (!n) {
+    for (const [word, num] of Object.entries(HE_NUMS)) {
+      const re = new RegExp(`(כל\\s+${word}\\s+ימים?)`);
+      const match = msg.match(re);
+      if (match) { n = num; intervalExpr = match[1]; break; }
+    }
+  }
+
+  if (!n || !intervalExpr) return null;
+
+  // Parse time from the rest of the message (after removing the interval expression)
+  const rest = msg.replace(intervalExpr, " ");
+  const { remindAt, timeExpr } = parseTimeWithExpr(rest, timezone);
+
+  const fullTimeExpr = [intervalExpr, timeExpr].filter(Boolean).join(" ");
+
+  if (!remindAt) {
+    // No specific time given — first reminder in N days from now
+    return { remindAt: new Date(Date.now() + n * 86400000), recurrence: `interval:${n}`, timeExpr: intervalExpr };
+  }
+
+  return { remindAt, recurrence: `interval:${n}`, timeExpr: fullTimeExpr };
 }
 
 function nextDailyOccurrence(hour, minute, timezone) {
@@ -214,7 +282,7 @@ function nextWeeklyOccurrence(targetDay, hour, minute, timezone) {
   return zonedDate(daysUntil, hour, minute, timezone);
 }
 
-function nextOccurrence(recurrence, timezone) {
+function nextOccurrence(recurrence, timezone, currentRemindAtSecs) {
   const parts = recurrence.split(":");
   if (parts[0] === "daily") {
     return nextDailyOccurrence(parseInt(parts[1]), parseInt(parts[2]), timezone);
@@ -223,6 +291,11 @@ function nextOccurrence(recurrence, timezone) {
     const t = nextWeeklyOccurrence(parseInt(parts[1]), parseInt(parts[2]), parseInt(parts[3]), timezone);
     const minNext = new Date(Date.now() + 6 * 86400000);
     return t < minNext ? new Date(t.getTime() + 7 * 86400000) : t;
+  }
+  if (parts[0] === "interval") {
+    const n = parseInt(parts[1]);
+    const base = currentRemindAtSecs ? currentRemindAtSecs * 1000 : Date.now();
+    return new Date(base + n * 86400000);
   }
   return null;
 }

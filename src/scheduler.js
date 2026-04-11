@@ -14,7 +14,7 @@ async function processDueReminders() {
 
       if (reminder.recurrence) {
         // Recurring: schedule next occurrence
-        const next = nextOccurrence(reminder.recurrence, TIMEZONE);
+        const next = nextOccurrence(reminder.recurrence, TIMEZONE, reminder.remind_at);
         if (next) {
           await rescheduleRecurring(reminder.id, Math.floor(next.getTime() / 1000));
         } else {
