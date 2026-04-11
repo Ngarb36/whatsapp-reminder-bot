@@ -154,8 +154,8 @@ function parseTime(msg, timezone) {
 // ── Task text extraction ──────────────────────────────────────────────────────
 
 function extractTaskText(msg, timeExpr) {
-  // Remove "תזכיר לי" prefix
-  let text = msg.replace(/^תזכיר לי\s*/i, "").trim();
+  // Remove reminder trigger words prefix
+  let text = msg.replace(/^(?:תזכורת|תזכיר לי|תזכיר)\s*/i, "").trim();
 
   // Remove the matched time expression
   if (timeExpr) {
