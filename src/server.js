@@ -121,7 +121,7 @@ router.post("/webhook", async (req, res) => {
         return;
       }
       const r = pending[idx];
-      const newTime = parseReminderRequest(result.newValue, timezone);
+      const newTime = await parseReminderRequest(result.newValue, timezone);
 
       // If newValue looks like a time → update time only
       if (newTime.action === "remind") {

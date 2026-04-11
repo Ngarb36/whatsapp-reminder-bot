@@ -1,7 +1,8 @@
 /**
- * Rule-based reminder parser — Hebrew & English.
- * Strategy: find the TIME anywhere in the message, the rest is the task.
+ * Reminder parser — tries Claude AI first, falls back to rule-based (Hebrew & English).
  */
+
+const Anthropic = require("@anthropic-ai/sdk");
 
 const HE_DAYS = { ראשון: 0, שני: 1, שלישי: 2, רביעי: 3, חמישי: 4, שישי: 5, שבת: 6 };
 const EN_DAYS = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
@@ -11,12 +12,156 @@ const HE_NUMS = {
   שבעה: 7, שבע: 7, שמונה: 8, תשעה: 9, תשע: 9, עשרה: 10, עשר: 10,
 };
 
+// ── Anthropic client (lazy, cached) ──────────────────────────────────────────
+
+let _anthropicClient = null;
+
+function getAnthropicClient() {
+  if (_anthropicClient !== null) return _anthropicClient;
+  if (!process.env.ANTHROPIC_API_KEY) return (_anthropicClient = false);
+  try {
+    _anthropicClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    return _anthropicClient;
+  } catch {
+    return (_anthropicClient = false);
+  }
+}
+
+// ── Claude-powered parsing ────────────────────────────────────────────────────
+
+async function parseWithClaude(message, timezone) {
+  const client = getAnthropicClient();
+  if (!client) return null;
+
+  const now = new Date();
+  const nowFormatted = now.toLocaleString("he-IL", {
+    timeZone: timezone,
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+
+  const parseReminderTool = {
+    name: "parse_reminder_request",
+    description:
+      "Parse a WhatsApp reminder request in Hebrew or English and extract the structured intent.",
+    input_schema: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["remind", "list", "delete", "edit", "cancel_help", "unknown", "error"],
+          description: "The detected action",
+        },
+        remindAt: {
+          type: "string",
+          description:
+            "ISO 8601 UTC datetime string for when to send the reminder. Required for action=remind.",
+        },
+        reminderText: {
+          type: "string",
+          description:
+            "The task/reminder text in the original language, without time info and without 'תזכיר לי'/'תזכורת' prefix. Required for action=remind.",
+        },
+        recurrence: {
+          type: "string",
+          description:
+            "Recurrence pattern: 'daily:HH:MM' (every day at HH:MM), 'weekly:D:HH:MM' (D: 0=Sun, 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat), 'interval:N' (every N days). Omit for one-time reminders.",
+        },
+        index: {
+          type: "integer",
+          description: "1-based reminder index for delete/edit actions.",
+        },
+        newValue: {
+          type: "string",
+          description: "New time or new text for the edit action.",
+        },
+        error: {
+          type: "string",
+          description: "Error message in Hebrew when the request is unclear or the time is past.",
+        },
+      },
+      required: ["action"],
+    },
+  };
+
+  try {
+    const response = await client.messages.create({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 512,
+      tools: [parseReminderTool],
+      tool_choice: { type: "auto" },
+      system: `You are a reminder parsing assistant for a WhatsApp bot. Parse the user message and call parse_reminder_request.
+
+Current date/time: ${nowFormatted} (timezone: ${timezone})
+Current UTC: ${now.toISOString()}
+
+Parsing rules:
+- "תזכיר לי", "תזכורת", "remind me" → action=remind
+- "list", "רשימה", "תראה", "הצג" → action=list
+- "מחק N" / "delete N" / "בטל N" / "cancel N" → action=delete with index=N
+- "ערוך N <text>" / "edit N <text>" → action=edit
+- "מחק" / "delete" (no number) → action=cancel_help
+- Strip "תזכיר לי" / "תזכורת" prefix from reminderText
+- Strip leading prepositions (ל, את, ה) from reminderText
+- Time words to strip from reminderText: מחר, היום, הלילה, בעוד, עוד, שעה, דקה, ב-HH:MM, כל יום, כל שלישי, etc.
+- "מחר" = tomorrow, "היום" = today, "הלילה" = tonight (evening hours)
+- "בעוד X דקות" = in X minutes, "בעוד X שעות" = in X hours
+- "כל יום ב-HH:MM" = daily recurrence → daily:HH:MM
+- "כל יום שלישי ב-HH:MM" = weekly on Tuesday → weekly:2:HH:MM
+- "כל X ימים ב-HH:MM" = every X days → interval:X
+- If time is in the past → action=error with Hebrew message
+- If unknown intent → action=unknown (will fall back to rule-based parser)
+- Always compute remindAt as a UTC ISO 8601 string`,
+      messages: [{ role: "user", content: message }],
+    });
+
+    const toolUse = response.content.find((b) => b.type === "tool_use");
+    if (!toolUse) return null;
+
+    return convertClaudeOutput(toolUse.input);
+  } catch (err) {
+    console.error("[parser] Claude API error:", err.message);
+    return null;
+  }
+}
+
+function convertClaudeOutput(input) {
+  const { action, remindAt, reminderText, recurrence, index, newValue, error } = input;
+
+  if (action === "list") return { action: "list" };
+  if (action === "cancel_help") return { action: "cancel_help" };
+  if (action === "delete" && index) return { action: "delete", index };
+  if (action === "edit" && index) return { action: "edit", index, newValue: newValue || "" };
+  if (action === "error" && error) return { error };
+  if (action === "unknown") return null; // signal: fall back to rule-based
+
+  if (action === "remind" && remindAt) {
+    const dateObj = new Date(remindAt);
+    if (isNaN(dateObj.getTime())) return null;
+    if (dateObj <= new Date()) return { error: "הזמן הזה כבר עבר. תן לי זמן עתידי!" };
+    return {
+      action: "remind",
+      remindAt: dateObj,
+      reminderText: reminderText || "",
+      recurrence: recurrence || null,
+    };
+  }
+
+  return null;
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-function parseReminderRequest(userMessage, timezone) {
+async function parseReminderRequest(userMessage, timezone) {
   const msg = userMessage.trim();
   const lower = msg.toLowerCase();
 
+  // Quick structural commands — no AI needed
   if (/^(list|רשימה|תראה|הצג)/.test(lower)) return { action: "list" };
 
   let m = lower.match(/^(?:מחק|בטל|delete|cancel)\s+(\d+)$/);
@@ -27,6 +172,15 @@ function parseReminderRequest(userMessage, timezone) {
 
   if (/^(?:מחק|בטל|delete|cancel)$/.test(lower)) return { action: "cancel_help" };
 
+  // Try Claude for natural language
+  const claudeResult = await parseWithClaude(msg, timezone);
+  if (claudeResult !== null) return claudeResult;
+
+  // ── Rule-based fallback ───────────────────────────────────────────────────
+  return parseRulesBased(msg, lower, timezone);
+}
+
+function parseRulesBased(msg, lower, timezone) {
   // ── Recurring ──────────────────────────────────────────────────────────────
   const recurring = parseRecurring(lower, timezone);
   if (recurring) {
@@ -41,12 +195,10 @@ function parseReminderRequest(userMessage, timezone) {
   // ── Multi-line: task on one line, time on another ─────────────────────────
   const lines = msg.split(/\n/).map((l) => l.trim()).filter(Boolean);
   if (lines.length >= 2) {
-    // Try last line as time
     const t1 = parseTime(lines[lines.length - 1].toLowerCase(), timezone);
     if (t1 && t1 > new Date()) {
       return { action: "remind", remindAt: t1, reminderText: lines.slice(0, -1).join(" "), recurrence: null };
     }
-    // Try first line as time
     const t2 = parseTime(lines[0].toLowerCase(), timezone);
     if (t2 && t2 > new Date()) {
       return { action: "remind", remindAt: t2, reminderText: lines.slice(1).join(" "), recurrence: null };
@@ -76,19 +228,12 @@ function parseTimeWithExpr(msg, timezone) {
   let m;
 
   const relPatterns = [
-    // "בעוד/עוד X דקות"
     { re: /(?:in|בעוד|עוד)\s+(\d+)\s*(?:minutes?|דקות?|דק'?)/, fn: (m) => addMinutes(now, parseInt(m[1])) },
-    // "בעוד/עוד X שעות"
     { re: /(?:in|בעוד|עוד)\s+(\d+)\s*(?:hours?|שעות?)/, fn: (m) => addMinutes(now, parseInt(m[1]) * 60) },
-    // "בעוד/עוד X ימים"
     { re: /(?:in|בעוד|עוד)\s+(\d+)\s*(?:days?|ימים?|יום)/, fn: (m) => addMinutes(now, parseInt(m[1]) * 60 * 24) },
-    // "עוד דקה" / "דקה"
     { re: /(?:(?:עוד|בעוד)\s+)?דקה(?:\s|$)/, fn: () => addMinutes(now, 1) },
-    // "עוד שעה" / "שעה"
     { re: /(?:(?:עוד|בעוד)\s+)?שעה(?:\s|$)/, fn: () => addMinutes(now, 60) },
-    // "עוד חצי שעה"
     { re: /(?:עוד|בעוד)\s+חצי\s+שעה/, fn: () => addMinutes(now, 30) },
-    // "עוד רבע שעה"
     { re: /(?:עוד|בעוד)\s+רבע\s+שעה/, fn: () => addMinutes(now, 15) },
   ];
 
@@ -97,11 +242,9 @@ function parseTimeWithExpr(msg, timezone) {
     if (m) return { remindAt: fn(m), timeExpr: m[0] };
   }
 
-  // "מחר ב-HH:MM" / "מחר בשעה HH" / "מחר HH:MM"
   m = msg.match(/(מחר|tomorrow)[\s\S]*?(\d{1,2})(?::(\d{2}))?/);
   if (m) return { remindAt: zonedDate(1, parseInt(m[2]), parseInt(m[3] || "0"), timezone), timeExpr: m[0] };
 
-  // "הלילה ב-HH"
   m = msg.match(/(הלילה|tonight)[\s\S]*?(\d{1,2})(?::(\d{2}))?/);
   if (m) {
     let h = parseInt(m[2]);
@@ -109,14 +252,12 @@ function parseTimeWithExpr(msg, timezone) {
     return { remindAt: zonedDate(0, h, parseInt(m[3] || "0"), timezone), timeExpr: m[0] };
   }
 
-  // "היום ב-HH:MM"
   m = msg.match(/(היום|today)[\s\S]*?(\d{1,2})(?::(\d{2}))?/);
   if (m) {
     const t = zonedDate(0, parseInt(m[2]), parseInt(m[3] || "0"), timezone);
     return { remindAt: t > now ? t : zonedDate(1, parseInt(m[2]), parseInt(m[3] || "0"), timezone), timeExpr: m[0] };
   }
 
-  // "ב-HH:MM" / "בשעה HH:MM"
   m = msg.match(/(?:ב-|בשעה\s*)(\d{1,2})(?::(\d{2}))?/);
   if (m) {
     const h = parseInt(m[1]), min = parseInt(m[2] || "0");
@@ -124,7 +265,6 @@ function parseTimeWithExpr(msg, timezone) {
     return { remindAt: t > now ? t : zonedDate(1, h, min, timezone), timeExpr: m[0] };
   }
 
-  // "at HH:MM"
   m = msg.match(/at\s+(\d{1,2})(?::(\d{2}))?/);
   if (m) {
     let h = parseInt(m[1]);
@@ -133,7 +273,6 @@ function parseTimeWithExpr(msg, timezone) {
     return { remindAt: t > now ? t : zonedDate(1, h, parseInt(m[2] || "0"), timezone), timeExpr: m[0] };
   }
 
-  // Standalone "HH:MM" anywhere
   m = msg.match(/(?:^|\s)(\d{1,2}):(\d{2})(?:\s|$)/);
   if (m) {
     const h = parseInt(m[1]), min = parseInt(m[2]);
@@ -146,7 +285,6 @@ function parseTimeWithExpr(msg, timezone) {
   return { remindAt: null, timeExpr: null };
 }
 
-// Simple wrapper used by edit logic
 function parseTime(msg, timezone) {
   return parseTimeWithExpr(msg, timezone).remindAt;
 }
@@ -154,17 +292,11 @@ function parseTime(msg, timezone) {
 // ── Task text extraction ──────────────────────────────────────────────────────
 
 function extractTaskText(msg, timeExpr) {
-  // Remove reminder trigger words prefix
   let text = msg.replace(/^(?:תזכורת|תזכיר לי|תזכיר)\s*/i, "").trim();
-
-  // Remove the matched time expression
   if (timeExpr) {
     text = text.replace(new RegExp(escapeRegex(timeExpr), "i"), " ").replace(/\s+/g, " ").trim();
   }
-
-  // Remove leading/trailing filler words
   text = text.replace(/^(?:ל|את|ה)\s+/i, "").trim();
-
   return text || msg;
 }
 
@@ -177,7 +309,6 @@ function escapeRegex(s) {
 function parseRecurring(msg, timezone) {
   let m;
 
-  // ── "כל יום שלישי" etc. (must be before "כל יום" to avoid false match) ────
   for (const [name, dayNum] of Object.entries(HE_DAYS)) {
     const re = new RegExp(`כל\\s+יום\\s+${name}[\\s\\S]*?(\\d{1,2})(?::(\\d{2}))?`);
     m = msg.match(re);
@@ -187,18 +318,15 @@ function parseRecurring(msg, timezone) {
     }
   }
 
-  // ── "כל X ימים" / "כל ארבעה ימים" / "כל יומיים" (interval) ───────────────
   const interval = parseIntervalRecurring(msg, timezone);
   if (interval) return interval;
 
-  // ── "כל יום" / "every day" (daily) ───────────────────────────────────────
   m = msg.match(/(?:כל יום|every day)[\s\S]*?(\d{1,2})(?::(\d{2}))?/);
   if (m) {
     const h = parseInt(m[1]), min = parseInt(m[2] || "0");
     return { remindAt: nextDailyOccurrence(h, min, timezone), recurrence: `daily:${pad(h)}:${pad(min)}`, timeExpr: m[0] };
   }
 
-  // ── "כל שלישי" (Hebrew weekly, without "יום") ────────────────────────────
   for (const [name, dayNum] of Object.entries(HE_DAYS)) {
     const re = new RegExp(`כל\\s+${name}[\\s\\S]*?(\\d{1,2})(?::(\\d{2}))?`);
     m = msg.match(re);
@@ -208,7 +336,6 @@ function parseRecurring(msg, timezone) {
     }
   }
 
-  // ── English weekly ────────────────────────────────────────────────────────
   for (const [name, dayNum] of Object.entries(EN_DAYS)) {
     const re = new RegExp(`every\\s+${name}[\\s\\S]*?(\\d{1,2})(?::(\\d{2}))?`);
     m = msg.match(re);
@@ -225,23 +352,19 @@ function parseIntervalRecurring(msg, timezone) {
   let n = null;
   let intervalExpr = null;
 
-  // "כל יומיים" (every 2 days)
   let m = msg.match(/(כל\s+יומיים)/);
   if (m) { n = 2; intervalExpr = m[1]; }
 
-  // "כל 4 ימים" (numeric)
   if (!n) {
     m = msg.match(/(כל\s+(\d+)\s+ימים?)/);
     if (m) { n = parseInt(m[2]); intervalExpr = m[1]; }
   }
 
-  // "every 4 days" (English numeric)
   if (!n) {
     m = msg.match(/(every\s+(\d+)\s+days?)/);
     if (m) { n = parseInt(m[2]); intervalExpr = m[1]; }
   }
 
-  // "כל ארבעה ימים" (Hebrew word numbers)
   if (!n) {
     for (const [word, num] of Object.entries(HE_NUMS)) {
       const re = new RegExp(`(כל\\s+${word}\\s+ימים?)`);
@@ -252,14 +375,11 @@ function parseIntervalRecurring(msg, timezone) {
 
   if (!n || !intervalExpr) return null;
 
-  // Parse time from the rest of the message (after removing the interval expression)
   const rest = msg.replace(intervalExpr, " ");
   const { remindAt, timeExpr } = parseTimeWithExpr(rest, timezone);
-
   const fullTimeExpr = [intervalExpr, timeExpr].filter(Boolean).join(" ");
 
   if (!remindAt) {
-    // No specific time given — first reminder in N days from now
     return { remindAt: new Date(Date.now() + n * 86400000), recurrence: `interval:${n}`, timeExpr: intervalExpr };
   }
 
